@@ -16,49 +16,133 @@ class Page extends PageHook
 
     public function authorize(?Authenticatable $user): bool
     {
-        return $user !== null && ($user->can('plugin.admin') || $user->can('admin'));
+        if ($user === null) {
+            return false;
+        }
+
+        try {
+            if ($user->can('plugin.admin')) {
+                return true;
+            }
+        } catch (\Throwable $e) {
+            // Gate plugin.admin no definido o error de DB — continuar con fallback
+        }
+
+        try {
+            return (bool) $user->can('admin');
+        } catch (\Throwable $e) {
+            return false;
+        }
     }
 
     public function data(): array
+    {
+        try {
+            return $this->buildData();
+        } catch (\Throwable $e) {
+            if (function_exists('report')) {
+                report($e);
+            }
+
+            $msg = 'Error al cargar RrdFix: ' . $e->getMessage() . ' (' . basename($e->getFile()) . ':' . $e->getLine() . ')';
+
+            return [
+                'title' => 'Corrección de RRD',
+                'plugin_name' => 'RrdFix',
+                'content_view' => 'RrdFix::resources.views.page',
+                'settings' => [],
+                'devices' => collect(),
+                'log_path' => self::LOG_PATH,
+                'log_content' => "=== INTERNAL ERROR ===\n" . $msg,
+                'running' => false,
+                'form' => PendingRun::emptyForm(),
+                'flash' => $msg,
+                'flash_type' => 'danger',
+                'docs' => $this->safeDocBundle(),
+                'plugin_version' => '1.1.1',
+                'status_url' => $this->safeStatusUrl(),
+            ];
+        }
+    }
+
+    private function buildData(): array
     {
         $settings = $this->getSettings();
         $pendingRun = PendingRun::fromSettings($settings);
         $result = null;
         if ($pendingRun !== null) {
             // Consume first so refreshing cannot launch the same correction twice.
-            $plugin = Plugin::where('plugin_name', 'RrdFix')->first();
-            if ($plugin !== null) {
-                $plugin->settings = [];
-                $plugin->save();
+            try {
+                $plugin = Plugin::where('plugin_name', 'RrdFix')->first();
+                if ($plugin !== null) {
+                    $plugin->settings = [];
+                    $plugin->save();
+                }
+            } catch (\Throwable $e) {
+                if (function_exists('report')) {
+                    report($e);
+                }
             }
 
-            $result = $this->run($pendingRun);
+            try {
+                $result = $this->run($pendingRun);
+            } catch (\Throwable $e) {
+                if (function_exists('report')) {
+                    report($e);
+                }
+                $result = ['flash' => 'Error al iniciar rrd-fix: ' . $e->getMessage(), 'flash_type' => 'danger'];
+            }
         }
 
-        $data = [
-            'devices' => Device::query()
+        try {
+            $devices = Device::query()
                 ->select(['device_id', 'hostname', 'sysName'])
                 ->orderBy('hostname')
-                ->get(),
+                ->get();
+        } catch (\Throwable $e) {
+            if (function_exists('report')) {
+                report($e);
+            }
+            $devices = collect();
+        }
+
+        return [
+            'title' => 'Corrección de RRD',
+            'content_view' => 'RrdFix::resources.views.page',
+            'devices' => $devices,
             'log_path' => self::LOG_PATH,
             'log_content' => $this->readLog(),
             'running' => $this->isRunning(),
             'form' => $pendingRun ?? PendingRun::emptyForm(),
             'flash' => $result['flash'] ?? null,
             'flash_type' => $result['flash_type'] ?? 'info',
-            'docs' => [
-                'guia'        => self::readDoc(__DIR__ . '/GUÍA.md'),
-                'faq'         => self::readDoc(__DIR__ . '/FAQ.md'),
-                'instalacion' => self::readDoc(__DIR__ . '/INSTALACIÓN.md'),
-                'arquitectura'=> self::readDoc(__DIR__ . '/ARQUITECTURA.md'),
-            ],
-            'plugin_version' => '1.1.0',
+            'docs' => $this->safeDocBundle(),
+            'plugin_version' => '1.1.1',
+            'status_url' => $this->safeStatusUrl(),
         ];
+    }
 
-        $data['log_content'] = $this->readLog();
-        $data['running'] = $this->isRunning();
+    private function safeStatusUrl(): string
+    {
+        try {
+            if (function_exists('route') && app('router')->has('rrdfix.status')) {
+                return route('rrdfix.status');
+            }
+        } catch (\Throwable $e) {
+            // ignore — fallback a url cruda
+        }
 
-        return $data;
+        return url('/rrdfix/status');
+    }
+
+    private function safeDocBundle(): array
+    {
+        return [
+            'guia'        => self::readDoc(__DIR__ . '/GUÍA.md'),
+            'faq'         => self::readDoc(__DIR__ . '/FAQ.md'),
+            'instalacion' => self::readDoc(__DIR__ . '/INSTALACIÓN.md'),
+            'arquitectura'=> self::readDoc(__DIR__ . '/ARQUITECTURA.md'),
+        ];
     }
 
     public function run(array $form): array
@@ -201,6 +285,31 @@ class Page extends PageHook
     /** @return array<string, mixed> */
     private function getSettings(): array
     {
-        return app(\LibreNMS\Interfaces\Plugins\PluginManagerInterface::class)->getSettings('RrdFix');
+        try {
+            return app(\LibreNMS\Interfaces\Plugins\PluginManagerInterface::class)->getSettings('RrdFix');
+        } catch (\Throwable $e) {
+            // Fallback directo a BD — evita desactivar el plugin si el
+            // PluginManager aún no está ligado en el contenedor.
+        }
+
+        try {
+            $plugin = Plugin::where('plugin_name', 'RrdFix')->first(['settings']);
+            if ($plugin !== null) {
+                $s = $plugin->settings;
+                if (is_array($s)) {
+                    return $s;
+                }
+                if (is_string($s)) {
+                    $decoded = json_decode($s, true);
+                    if (is_array($decoded)) {
+                        return $decoded;
+                    }
+                }
+            }
+        } catch (\Throwable $e) {
+            // ignore
+        }
+
+        return [];
     }
 }

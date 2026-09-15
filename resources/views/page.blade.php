@@ -696,7 +696,7 @@
        RrdFix v1.1 — runtime JS (live log + progress bar + docs tabs)
        ========================================================== */
     (function () {
-        var statusUrl  = @json(function_exists('app') && method_exists(app('router'),'has') && app('router')->has('rrdfix.status') ? route('rrdfix.status') : url('rrdfix/status'));
+        var statusUrl  = @json($status_url ?? (function_exists('app') && method_exists(app('router'),'has') && app('router')->has('rrdfix.status') ? route('rrdfix.status') : url('rrdfix/status')));
         var running    = @json($running);
         var startedAt  = running ? Date.now() : null;
         var timerId    = null;
