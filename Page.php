@@ -14,7 +14,13 @@ class Page extends PageHook
     private const LOG_PATH = '/opt/librenms/storage/logs/rrd-fix.log';
     private const RRD_DIR = '/opt/librenms/rrd';
 
-    public function authorize(?Authenticatable $user): bool
+    /**
+     * Firma idéntica a Reports/FlowbiteTheme/WebSSH.
+     * PluginManager SIEMPRE inyecta 'settings' vía app()->call([$this,'authorize']),
+     * por lo que el 2do parámetro DEBE existir para evitar error al resolver
+     * dependencias en BoundMethod de Laravel.
+     */
+    public function authorize(?Authenticatable $user, array $settings = []): bool
     {
         if ($user === null) {
             return false;
@@ -35,7 +41,13 @@ class Page extends PageHook
         }
     }
 
-    public function data(): array
+    /**
+     * data() acepta también 'settings' por la misma razón — fillArgs() del
+     * PluginManager agrega 'settings' => [...] a cada llamada call().
+     * No usamos ese settings porque getSettings() ya lo obtiene via Model
+     * con fallback robusto.
+     */
+    public function data(array $settings = []): array
     {
         try {
             return $this->buildData();
@@ -59,7 +71,7 @@ class Page extends PageHook
                 'flash' => $msg,
                 'flash_type' => 'danger',
                 'docs' => $this->safeDocBundle(),
-                'plugin_version' => '1.1.1',
+                'plugin_version' => '1.1.2',
                 'status_url' => $this->safeStatusUrl(),
             ];
         }
@@ -117,7 +129,7 @@ class Page extends PageHook
             'flash' => $result['flash'] ?? null,
             'flash_type' => $result['flash_type'] ?? 'info',
             'docs' => $this->safeDocBundle(),
-            'plugin_version' => '1.1.1',
+            'plugin_version' => '1.1.2',
             'status_url' => $this->safeStatusUrl(),
         ];
     }

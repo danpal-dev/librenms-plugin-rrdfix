@@ -31,7 +31,16 @@ class Settings extends SettingsHook
         }
     }
 
-    public function authorize(?Authenticatable $user): bool
+    /**
+     * NOTE: la firma DEBE incluir array $settings = [] porque el PluginManager
+     * llama a app()->call([$this,'authorize'], ['settings' => [...], ...])
+     * y si el método no acepta el parámetro, puede fallar en algunas
+     * versiones de LibreNMS/Laravel y desactivar el plugin.
+     *
+     * Se usa exactamente la misma firma que Reports/FlowbiteTheme/WebSSH
+     * (plugins que SÍ funcionan correctamente).
+     */
+    public function authorize(?Authenticatable $user, array $settings = []): bool
     {
         if ($user === null) {
             return false;

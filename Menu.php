@@ -7,7 +7,11 @@ use App\Plugins\Hooks\MenuEntryHook;
 
 class Menu extends MenuEntryHook
 {
-    public function authorize(?Authenticatable $user): bool
+    /**
+     * Firma idéntica a Reports/FlowbiteTheme/WebSSH.
+     * PluginManager pasa SIEMPRE 'settings' a authorize() vía app()->call().
+     */
+    public function authorize(?Authenticatable $user, array $settings = []): bool
     {
         if ($user === null) {
             return false;
@@ -28,7 +32,7 @@ class Menu extends MenuEntryHook
         }
     }
 
-    public function data(): array
+    public function data(array $settings = []): array
     {
         return [];
     }
