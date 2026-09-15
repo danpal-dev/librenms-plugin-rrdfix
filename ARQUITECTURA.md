@@ -22,6 +22,47 @@ en el nivel **root** del plugin debe implementar una interfaz de
 **Clases auxiliares NO en root:** van en subdirectorios: `Http/`, `Support/`,
 `resources/views/`. Así el PluginProvider no los intenta cargar como hooks.
 
+### 1.1 🔑 FIRMAS DE HOOKS — REGLAS OBLIGATORIAS (no romperlas)
+
+> Regla extraída a posteriori del bug v1.1.0/1.1.1: **"Vista faltante."**
+> aunque el plugin esté activo.
+>
+> **Causa raíz:** `PluginManager::fillArgs()` inyecta SIEMPRE `settings`,
+> `pluginName` y `user` a `app()->call([$hookInst,'authorize'], $args)`
+> y `app()->call([$hookInst,'data'], $args)`. Si los métodos no declaran
+> los parámetros que se pasan por nombre, `BoundMethod::call()` puede
+> lanzar excepción según versión Laravel → **desactivación automática**
+> del plugin → NO se registra el namespace de vistas `loadViewsFrom()`
+> → `PluginPageController` hace fallback a `plugins.missing`.
+
+#### Tabla de firmas OBLIGATORIAS (copiar literalmente):
+
+| Hook             | `authorize()` — firma obligatoria                          | `data()` — firma obligatoria             |
+|---               |---                                                         |---                                       |
+| `Settings.php`   | `authorize(?Authenticatable $user, array $settings = [])`  | `data(array $settings): array`           |
+| `Menu.php`       | `authorize(?Authenticatable $user, array $settings = [])`  | `data(array $settings = []): array`      |
+| `Page.php`       | `authorize(?Authenticatable $user, array $settings = [])`  | `data(array $settings = []): array`      |
+| `DeviceOverview` | `authorize(?Authenticatable $user, Device $device)`        | `data(Device $device): array`            |
+
+- Import: `use Illuminate\Contracts\Auth\Authenticatable;` (nunca
+  `\Illuminate\Foundation\Auth\User` — no es intercambiable).
+- El param `array $settings = []` **debe tener valor por defecto** — así
+  el método sigue siendo válido incluso cuando Container no lo inyecta.
+- `DeviceOverview` NO usa `$settings` como 2º param porque el Hook base
+  (`DeviceOverviewHook`) pasa un `Device $device` — respeta la firma.
+
+#### Buenas prácticas anti-fallo (RrdFix las usa todas):
+
+1. **`authorize()` con try/catch por cada `$user->can(...)`.** El gate
+   `plugin.admin` no está definido en todas las instalaciones.
+2. **`data()` con try/catch general** que devuelva un array mínimo
+   conteniendo SIEMPRE `'content_view' => 'RrdFix::...'` (evita fallback
+   a plugins.missing).
+3. **`Settings::__construct()` que registra rutas — envolver en
+   try/catch(\Throwable)** + comprobar `app()->routesAreCached()`.
+4. **Nunca `route('plugin.route.name')` directo en Blade.** Calcula una
+   variable con `Router::has()` + fallback a `url('/ruta/bruta')`.
+
 ---
 
 ## 2. Flujo completo: Usuario → Submit → Ejecución → UI en vivo
