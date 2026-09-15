@@ -3,23 +3,30 @@
 namespace App\Plugins\RrdFix;
 
 use App\Plugins\Hooks\SettingsHook;
-use App\Plugins\RrdFix\Http\RunController;
 use Illuminate\Contracts\Auth\Authenticatable;
-use Illuminate\Support\Facades\Route;
-
-Route::middleware(['web', 'auth', 'can:plugin.admin'])->group(function () {
-    Route::get('rrdfix/status', [RunController::class, 'status'])->name('rrdfix.status');
-});
 
 class Settings extends SettingsHook
 {
-    public function authorize(?Authenticatable $user): bool
+    public function __construct()
     {
-        return $user !== null && $user->can('plugin.admin');
+        if (app()->routesAreCached()) {
+            return;
+        }
+
+        \Illuminate\Support\Facades\Route::middleware(['web', 'auth'])->group(function () {
+            \Illuminate\Support\Facades\Route::get('rrdfix/status', [\App\Plugins\RrdFix\Http\RunController::class, 'status'])->name('rrdfix.status');
+        });
     }
 
-    public function data(array $settings = []): array
+    public function authorize(?Authenticatable $user): bool
     {
-        return [];
+        return $user !== null && ($user->can('plugin.admin') || $user->can('admin'));
+    }
+
+    public function data(array $settings): array
+    {
+        return [
+            'settings' => $settings,
+        ];
     }
 }

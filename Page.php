@@ -16,11 +16,12 @@ class Page extends PageHook
 
     public function authorize(?Authenticatable $user): bool
     {
-        return $user !== null && $user->can('plugin.admin');
+        return $user !== null && ($user->can('plugin.admin') || $user->can('admin'));
     }
 
-    public function data(array $settings = []): array
+    public function data(): array
     {
+        $settings = $this->getSettings();
         $pendingRun = PendingRun::fromSettings($settings);
         $result = null;
         if ($pendingRun !== null) {
@@ -195,5 +196,11 @@ class Page extends PageHook
         $lines = explode("\n", $body);
 
         return ['title' => $title ?: basename($path), 'lines' => $lines, 'empty' => trim($body) === ''];
+    }
+
+    /** @return array<string, mixed> */
+    private function getSettings(): array
+    {
+        return app(\LibreNMS\Interfaces\Plugins\PluginManagerInterface::class)->getSettings('RrdFix');
     }
 }

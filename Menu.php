@@ -7,12 +7,12 @@ use App\Plugins\Hooks\MenuEntryHook;
 
 class Menu extends MenuEntryHook
 {
-    public function authorize(?Authenticatable $user, array $settings = []): bool
+    public function authorize(?Authenticatable $user): bool
     {
-        return $user !== null && $user->can('plugin.admin');
+        return $user !== null && ($user->can('plugin.admin') || $user->can('admin'));
     }
 
-    public function data(array $settings = []): array
+    public function data(): array
     {
         return [];
     }
