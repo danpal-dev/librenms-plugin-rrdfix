@@ -192,6 +192,34 @@ cd /opt/librenms/app/Plugins/RrdFix && sudo -u librenms git pull origin master
 
 ---
 
+## 🗺 Paths canónicos (NO confundir)
+
+> Este plugin es la **única versión mantenida** de RrdFix.
+> No hay "scripts externos" fuera de este directorio — antes del 2026-09-15 existió
+> un skill de TRAE en `.github/skills/rrd-fix/` con una versión standalone
+> vieja del script Python; hoy **el skill fue ELIMINADO completamente** y cualquier
+> referencia a paths como `.github/skills/rrd-fix/scripts/rrd-fix.py` es obsoleta.
+
+| Propósito | Path canónico (SIEMPRE usar este) |
+|---|---|
+| Script CLI de corrección de RRD (Python) | `/opt/librenms/app/Plugins/RrdFix/rrd-fix.py` |
+| Plugin web LibreNMS (formulario) | `/plugin/RrdFix` |
+| Implementación de los hooks | `app/Plugins/RrdFix/Settings.php`, `Menu.php`, `Page.php` |
+| Tests autónomos | `/opt/librenms/app/Plugins/RrdFix/tests/run.php` |
+| Instalador de release de GitHub | `/opt/librenms/app/Plugins/RrdFix/scripts/install-release.sh` |
+| Auditoría / diagnose plugin vs Reports | `/opt/librenms/app/Plugins/RrdFix/scripts/diagnose-plugin.php` |
+
+**Uso CLI rápido (sin abrir la web):**
+```bash
+python3 /opt/librenms/app/Plugins/RrdFix/rrd-fix.py \
+  --ip 10.21.21.1 \
+  --start "2026-09-10 08:00:00" \
+  --end   "2026-09-10 09:30:00" \
+  --avail-fill 100
+```
+
+---
+
 ## 📁 Estructura (100% autocontenido — NADA fuera de este directorio)
 
 ```
