@@ -1,16 +1,6 @@
 @php
   $fb = class_exists('\App\Plugins\FlowbiteTheme\FlowbiteTheme') || $fbActive = (static function() { $c = \App\Models\Plugin::where('plugin_name','FlowbiteTheme')->value('plugin_active'); return $c == '1'; })();
 @endphp
-<!DOCTYPE html>
-@if(View::exists('layouts.flowbite'))
-  @extends('layouts.flowbite')
-@else
-  @extends('layouts.default')
-@endif
-
-@section('title', 'RrdFix: Corrección de RRD | LibreNMS')
-
-@section('content')
 <div id="rrdfix-root" class="container-fluid py-4 rrdfix-flowbite">
     <style>
         /* =========================================================
@@ -682,19 +672,19 @@
                 <div class="rrdfix-doc-body">
                     <section class="rrdfix-doc-pane active" data-doc-pane="guia">
                         <h2 style="margin-top:0">{{ $docs['guia']['title'] }}</h2>
-                        @include('Plugins/RrdFix::markdown-lines', ['lines' => $docs['guia']['lines']])
+                        @include('RrdFix::resources.views.markdown-lines', ['lines' => $docs['guia']['lines']])
                     </section>
                     <section class="rrdfix-doc-pane" data-doc-pane="faq">
                         <h2 style="margin-top:0">{{ $docs['faq']['title'] }}</h2>
-                        @include('Plugins/RrdFix::markdown-lines', ['lines' => $docs['faq']['lines']])
+                        @include('RrdFix::resources.views.markdown-lines', ['lines' => $docs['faq']['lines']])
                     </section>
                     <section class="rrdfix-doc-pane" data-doc-pane="instalacion">
                         <h2 style="margin-top:0">{{ $docs['instalacion']['title'] }}</h2>
-                        @include('Plugins/RrdFix::markdown-lines', ['lines' => $docs['instalacion']['lines']])
+                        @include('RrdFix::resources.views.markdown-lines', ['lines' => $docs['instalacion']['lines']])
                     </section>
                     <section class="rrdfix-doc-pane" data-doc-pane="arquitectura">
                         <h2 style="margin-top:0">{{ $docs['arquitectura']['title'] }}</h2>
-                        @include('Plugins/RrdFix::markdown-lines', ['lines' => $docs['arquitectura']['lines']])
+                        @include('RrdFix::resources.views.markdown-lines', ['lines' => $docs['arquitectura']['lines']])
                     </section>
                 </div>
             </div>
@@ -911,6 +901,3 @@
     })();
     </script>
 </div>
-@endsection
-
-{{-- __halt_compiler -- to avoid blade parsing the markdown below (unused) --}}
