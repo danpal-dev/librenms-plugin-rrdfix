@@ -1,0 +1,16 @@
+# No trackear
+
+# Archivos Python cache
+__pycache__/
+*.py[cod]
+*.so
+
+# Logs y temporales
+storage/logs/*
+tmp/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+.DS_Store
