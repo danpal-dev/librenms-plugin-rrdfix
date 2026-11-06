@@ -16,6 +16,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone, timedelta
 
 try:
@@ -164,7 +165,7 @@ def historical_fill_xml(xml_text: str, ts_start: int, ts_end: int,
         ordered_timestamps = sorted(rows)
 
         def valid(value: str) -> bool:
-            return "nan" not in value.lower()
+            return "nan" not in value.lower() and value != DOWN_DBM
 
         def replace_row(row_match):
             nonlocal filled, missing
@@ -660,6 +661,102 @@ def _fill_nan_with_neighbors(rrd: str, nan_timestamps: list[int], fname: str) ->
     return [f"    → {cnt[0]} reemplazos  {status}"]
 
 
+# ─── Detección automática de caídas ──────────────────────────────────────────
+def _fetch_rows(rrd: str, ts_first: int, ts_last: int):
+    """Genera (ts, [valores float]) de un RRD a resolución STEP."""
+    rrdcached_command("FLUSH", rrd)
+    res = run(["rrdtool", "fetch", rrd, "AVERAGE", "--resolution", str(STEP),
+               "--start", str(ts_first - STEP), "--end", str(ts_last)])
+    if res.returncode:
+        return
+    for line in res.stdout.splitlines():
+        head, sep, tail = line.partition(":")
+        if not sep:
+            continue
+        try:
+            ts = int(head.strip())
+            vals = [float(v) for v in tail.split()]
+        except ValueError:
+            continue
+        if ts_first <= ts <= ts_last:
+            yield ts, vals
+
+
+def db_outage_rows(ip: str, ts_first: int, ts_last: int) -> set[int]:
+    """Filas RRD cubiertas por caídas registradas en device_outages (pueden no verse en los RRD)."""
+    rows: set[int] = set()
+    if not _HAS_PYMYSQL:
+        return rows
+    cfg = _read_db_config()
+    if not cfg.get("db_host"):
+        return rows
+    try:
+        conn = pymysql.connect(host=cfg["db_host"], user=cfg["db_user"],
+                               password=cfg["db_pass"], database=cfg["db_name"], connect_timeout=5)
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT o.going_down, COALESCE(o.up_again, %s) FROM device_outages o"
+                " JOIN devices d USING (device_id) WHERE d.hostname = %s"
+                " AND o.going_down <= %s AND COALESCE(o.up_again, %s) >= %s",
+                (ts_last, ip, ts_last, ts_last, ts_first))
+            for down, up in cur.fetchall():
+                ts = max(first_rrd_row(int(down) - 1), ts_first)
+                while ts <= min(int(up), ts_last):
+                    rows.add(ts)
+                    ts += STEP
+    except Exception:
+        pass
+    return rows
+
+
+def detect_outage_segments(rrd_dir: str, ts_first: int, ts_last: int,
+                           max_gap_rows: int = 2) -> list[tuple[int, int]] | None:
+    """
+    Devuelve [(primera_fila, última_fila)] de cada caída dentro del rango.
+    Una fila cuenta como caída si en cualquiera de estas fuentes se ve caída:
+      - icmp-perf.rrd: paquetes recibidos (rcv) NaN o 0
+      - sensor-dbm-*.rrd: potencia óptica <= -35 dBm (sentinela -40)
+      - availability-86400.rrd: disponibilidad < 99.9 %
+      - device_outages (BD): caídas registradas en LibreNMS
+    Caídas separadas por <= max_gap_rows filas sanas se unen.
+    None si no existe icmp-perf.rrd (no se puede determinar).
+    """
+    icmp = os.path.join(rrd_dir, "icmp-perf.rrd")
+    if not os.path.exists(icmp):
+        return None
+
+    down_rows: set[int] = set()
+    for ts, vals in _fetch_rows(icmp, ts_first, ts_last):
+        if len(vals) >= 3 and (vals[2] != vals[2] or vals[2] <= 0):
+            down_rows.add(ts)
+
+    for f in sorted(os.listdir(rrd_dir)):
+        if re.match(r"^sensor-dbm-.*\.rrd$", f):
+            for ts, vals in _fetch_rows(os.path.join(rrd_dir, f), ts_first, ts_last):
+                if vals and vals[0] == vals[0] and vals[0] <= -35.0:
+                    down_rows.add(ts)
+
+    avail = os.path.join(rrd_dir, "availability-86400.rrd")
+    if os.path.exists(avail):
+        for ts, vals in _fetch_rows(avail, ts_first, ts_last):
+            if vals and vals[0] == vals[0] and vals[0] < 99.9:
+                down_rows.add(ts)
+
+    down_rows |= db_outage_rows(os.path.basename(os.path.normpath(rrd_dir)), ts_first, ts_last)
+
+    segments: list[tuple[int, int]] = []
+    for ts in sorted(down_rows):
+        if segments and ts - segments[-1][1] <= STEP * (max_gap_rows + 1):
+            segments[-1] = (segments[-1][0], ts)
+        else:
+            segments.append((ts, ts))
+    return segments
+
+
+def fmt_ts(ts: int) -> str:
+    return datetime.fromtimestamp(ts, TZ_LIMA).strftime("%Y-%m-%d %H:%M:%S")
+
+
 # ─── Modo interactivo ─────────────────────────────────────────────────────────
 def ask(prompt: str, default: str = "") -> str:
     suffix = f" [{default}]" if default else ""
@@ -710,6 +807,7 @@ def interactive_mode(rrd_base: str) -> argparse.Namespace:
     args.scan_nan   = scan not in ("n", "no")
     args.scan_start = None
     args.scan_end   = None
+    args.no_auto    = False
     print("└────────────────────────────────────────────────────────────────┘\n")
     return args
 
@@ -821,53 +919,7 @@ def fix_db(ip: str, unix_start: int, unix_end: int, avail_fill: int) -> list[str
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
-def main():
-    global BACKUP_SUFFIX
-    parser = argparse.ArgumentParser(
-        description="Corrige RRD LibreNMS para un período. Sin argumentos: modo interactivo.")
-    parser.add_argument("--ip",         help="IP del dispositivo")
-    parser.add_argument("--start",      help="Inicio 'YYYY-MM-DD HH:MM:SS' (Lima)")
-    parser.add_argument("--end",        help="Fin 'YYYY-MM-DD HH:MM:SS' (Lima)")
-    parser.add_argument("--no-dbm",     action="store_true", help="Omitir corrección dBm SFP")
-    parser.add_argument("--rrd-dir",    default=RRD_BASE, help=f"Directorio base RRD (default: {RRD_BASE})")
-    parser.add_argument("--scan-nan",   action="store_true", help="Buscar y rellenar NaN en el mes del período")
-    parser.add_argument("--scan-start", default=None, help="Inicio rango scan NaN 'YYYY-MM-DD HH:MM:SS'")
-    parser.add_argument("--scan-end",   default=None, help="Fin rango scan NaN 'YYYY-MM-DD HH:MM:SS'")
-    parser.add_argument("--avail-fill", type=int, choices=[0, 100], default=100,
-                        help="100 (default) = corregir falsa caída  |  0 = marcar como caída real")
-    args = parser.parse_args()
-
-    # Sin --ip lanzar modo interactivo
-    if not args.ip:
-        args = interactive_mode(args.rrd_dir)
-
-    # --scan-start/--scan-end implican --scan-nan automáticamente
-    if args.scan_start or args.scan_end:
-        args.scan_nan = True
-
-    rrd_dir = os.path.join(args.rrd_dir, args.ip)
-    if not os.path.isdir(rrd_dir):
-        sys.exit(f"ERROR: directorio no encontrado: {rrd_dir}")
-
-    unix_start = local_to_unix(args.start)
-    unix_end   = local_to_unix(args.end)
-
-    ts_down_start = first_rrd_row(unix_start)   # primera fila afectada
-    ts_down_end   = (unix_end // STEP) * STEP   # última fila completamente caída
-    ts_recov      = ts_down_end + STEP           # fila de recuperación
-
-    print(f"\n{'─'*60}")
-    print(f"  Dispositivo : {args.ip}")
-    modo = "100% (corregir falso down)" if args.avail_fill == 100 else "0% (caída real)"
-    print(f"  Período     : {args.start}  →  {args.end}  (Lima)")
-    print(f"  Modo        : {modo}")
-    print(f"  Rows RRD    : {ts_down_start} → {ts_down_end}  recov={ts_recov}")
-    print(f"{'─'*60}")
-
-    BACKUP_SUFFIX = datetime.now().strftime("%Y%m%d_%H%M%S")
-    BACKED_UP.clear()
-    print(f"\n[Backups] bajo demanda, sufijo: .bak_{BACKUP_SUFFIX}")
-
+def apply_fixes(args, rrd_dir, ts_down_start, ts_down_end, ts_recov, unix_start, unix_end):
     # Availability
     print("\n[Availability]")
     for fname, window in AVAIL_FILES:
@@ -901,6 +953,96 @@ def main():
         lines = fix_ports(rrd_dir, ts_down_start, ts_down_end)
         print("\n".join(lines) if lines else "  sin NaN en el período")
 
+    # Cuando el dispositivo estaba UP, reconstruir el período con días anteriores
+    if args.avail_fill == 100:
+        print("\n[icmp-perf - patrón de días anteriores]")
+        print(fix_icmp_neighbor(rrd_dir, ts_down_start, ts_down_end))
+
+        print("\n[Sensores + dBm - patrón de días anteriores]")
+        lines = fix_generic_sensors(rrd_dir, ts_down_start, ts_down_end)
+        print("\n".join(lines) if lines else "  sin RRD relevantes")
+
+        print("\n[Puertos - patrón de días anteriores]")
+        lines = fix_ports(rrd_dir, ts_down_start, ts_down_end, use_neighbor=True)
+        print("\n".join(lines) if lines else "  sin RRD de puertos")
+
+    # DB: eliminar (avail_fill=100) o insertar (avail_fill=0)
+    print("\n[DB — device_outages / eventlog / alert_log]")
+    for line in fix_db(args.ip, unix_start, unix_end, args.avail_fill):
+        print(line)
+
+
+def main():
+    global BACKUP_SUFFIX
+    parser = argparse.ArgumentParser(
+        description="Corrige RRD LibreNMS para un período. Sin argumentos: modo interactivo.")
+    parser.add_argument("--ip",         help="IP del dispositivo")
+    parser.add_argument("--start",      help="Inicio 'YYYY-MM-DD HH:MM:SS' (Lima)")
+    parser.add_argument("--end",        help="Fin 'YYYY-MM-DD HH:MM:SS' (Lima)")
+    parser.add_argument("--no-dbm",     action="store_true", help="Omitir corrección dBm SFP")
+    parser.add_argument("--rrd-dir",    default=RRD_BASE, help=f"Directorio base RRD (default: {RRD_BASE})")
+    parser.add_argument("--scan-nan",   action="store_true", help="Buscar y rellenar NaN en el mes del período")
+    parser.add_argument("--scan-start", default=None, help="Inicio rango scan NaN 'YYYY-MM-DD HH:MM:SS'")
+    parser.add_argument("--scan-end",   default=None, help="Fin rango scan NaN 'YYYY-MM-DD HH:MM:SS'")
+    parser.add_argument("--avail-fill", type=int, choices=[0, 100], default=100,
+                        help="100 (default) = corregir falsa caída  |  0 = marcar como caída real")
+    parser.add_argument("--no-auto", action="store_true",
+                        help="No detectar caídas: corregir todo el rango indicado")
+    args = parser.parse_args()
+
+    # Sin --ip lanzar modo interactivo
+    if not args.ip:
+        args = interactive_mode(args.rrd_dir)
+
+    # --scan-start/--scan-end implican --scan-nan automáticamente
+    if args.scan_start or args.scan_end:
+        args.scan_nan = True
+
+    rrd_dir = os.path.join(args.rrd_dir, args.ip)
+    if not os.path.isdir(rrd_dir):
+        sys.exit(f"ERROR: directorio no encontrado: {rrd_dir}")
+
+    unix_start = local_to_unix(args.start)
+    unix_end   = local_to_unix(args.end)
+
+    ts_down_start = first_rrd_row(unix_start)   # primera fila afectada
+    ts_down_end   = (min(unix_end, int(time.time())) // STEP) * STEP   # última fila caída (nunca futura)
+    ts_recov      = ts_down_end + STEP           # fila de recuperación
+
+    print(f"\n{'─'*60}")
+    print(f"  Dispositivo : {args.ip}")
+    modo = "100% (corregir falso down)" if args.avail_fill == 100 else "0% (caída real)"
+    print(f"  Período     : {args.start}  →  {args.end}  (Lima)")
+    print(f"  Modo        : {modo}")
+    print(f"  Rows RRD    : {ts_down_start} → {ts_down_end}  recov={ts_recov}")
+    print(f"{'─'*60}")
+
+    BACKUP_SUFFIX = datetime.now().strftime("%Y%m%d_%H%M%S")
+    BACKED_UP.clear()
+    print(f"\n[Backups] bajo demanda, sufijo: .bak_{BACKUP_SUFFIX}")
+
+    segments = None
+    if not args.no_auto:
+        segments = detect_outage_segments(rrd_dir, ts_down_start, ts_down_end)
+        if segments is None:
+            print("\n[Auto] icmp-perf.rrd no disponible — se corrige todo el rango")
+        elif not segments:
+            print("\n[Auto] No se detectaron caídas en el rango — nada que corregir")
+        else:
+            print(f"\n[Auto] {len(segments)} caída(s) detectada(s) en el rango:")
+            for a, b in segments:
+                print(f"    {fmt_ts(a)} → {fmt_ts(b)}  ({(b - a) // STEP + 1} filas)")
+    if segments is None:
+        segments = [(ts_down_start, ts_down_end)]
+        unix_ranges = [(unix_start, unix_end)]
+    else:
+        unix_ranges = [(a - STEP, b) for a, b in segments]
+
+    for n, ((seg_start, seg_end), (u_start, u_end)) in enumerate(zip(segments, unix_ranges), 1):
+        if not args.no_auto:
+            print(f"\n{'═'*60}\n  Caída {n}/{len(segments)}: {fmt_ts(seg_start)} → {fmt_ts(seg_end)}\n{'═'*60}")
+        apply_fixes(args, rrd_dir, seg_start, seg_end, seg_end + STEP, u_start, u_end)
+
     # Scan NaN
     if args.scan_nan:
         if args.scan_start and args.scan_end:
@@ -927,24 +1069,6 @@ def main():
         for line in scan_and_fill_nan(rrd_dir, scan_from, scan_to,
                                       ts_down_start, ts_down_end):
             print(line)
-
-    # Cuando el dispositivo estaba UP, reconstruir el período con días anteriores
-    if args.avail_fill == 100:
-        print("\n[icmp-perf - patrón de días anteriores]")
-        print(fix_icmp_neighbor(rrd_dir, ts_down_start, ts_down_end))
-
-        print("\n[Sensores + dBm - patrón de días anteriores]")
-        lines = fix_generic_sensors(rrd_dir, ts_down_start, ts_down_end)
-        print("\n".join(lines) if lines else "  sin RRD relevantes")
-
-        print("\n[Puertos - patrón de días anteriores]")
-        lines = fix_ports(rrd_dir, ts_down_start, ts_down_end, use_neighbor=True)
-        print("\n".join(lines) if lines else "  sin RRD de puertos")
-
-    # DB: eliminar (avail_fill=100) o insertar (avail_fill=0)
-    print("\n[DB — device_outages / eventlog / alert_log]")
-    for line in fix_db(args.ip, unix_start, unix_end, args.avail_fill):
-        print(line)
 
     print(f"\n[Backups] {len(BACKED_UP)} RRD modificados, sufijo: .bak_{BACKUP_SUFFIX}")
     print(f"\n{'─'*60}\n  Corrección completada.\n{'─'*60}\n")

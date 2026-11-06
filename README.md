@@ -218,6 +218,11 @@ python3 /opt/librenms/app/Plugins/RrdFix/rrd-fix.py \
   --avail-fill 100
 ```
 
+**Detección automática de caídas:** el rango `--start/--end` puede abarcar varios días.
+El script detecta en `icmp-perf.rrd` las filas caídas (rcv NaN/0), las agrupa en caídas
+y corrige **solo** esas; los días/horas sanos no se tocan. Si no hay caídas, no modifica nada.
+Usa `--no-auto` para forzar la corrección de todo el rango.
+
 ---
 
 ## 📁 Estructura (100% autocontenido — NADA fuera de este directorio)
